@@ -1,4 +1,5 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header, Depends
+from fastapi.security import HTTPBearer
 from pydantic import BaseModel
 
 from app.database import init_db, get_connection
@@ -15,6 +16,9 @@ from app.usage_service import report_usage
 app = FastAPI(title="RewardBank")
 
 init_db()
+
+# Swagger authentication
+security = HTTPBearer(auto_error=False)
 
 
 # =========================
@@ -36,6 +40,94 @@ class UsageRequest(BaseModel):
 
 
 # =========================
+# Authentication
+# =========================
+
+def get_authenticated_user(authorization: str | None):
+    if not authorization:
+        raise HTTPException(
+            status_code=401,
+            detail="Authorization token required",
+        )
+
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid authorization format",
+        )
+
+    token = authorization.replace("Bearer ", "", 1).strip()
+
+    connection = get_connection()
+
+    parent = connection.execute(
+        """
+        SELECT id, name
+        FROM parents
+        WHERE token = ?
+        """,
+        (token,),
+    ).fetchone()
+
+    if parent is not None:
+        connection.close()
+
+        return {
+            "type": "PARENT",
+            "id": parent["id"],
+            "name": parent["name"],
+        }
+
+    child = connection.execute(
+        """
+        SELECT id, name, parent_id
+        FROM children
+        WHERE token = ?
+        """,
+        (token,),
+    ).fetchone()
+
+    connection.close()
+
+    if child is not None:
+        return {
+            "type": "CHILD",
+            "id": child["id"],
+            "name": child["name"],
+            "parent_id": child["parent_id"],
+        }
+
+    raise HTTPException(
+        status_code=401,
+        detail="Invalid authorization token",
+    )
+
+
+def require_parent(authorization: str | None):
+    user = get_authenticated_user(authorization)
+
+    if user["type"] != "PARENT":
+        raise HTTPException(
+            status_code=403,
+            detail="Parent access required",
+        )
+
+    return user
+
+
+def require_child(authorization: str | None):
+    user = get_authenticated_user(authorization)
+
+    if user["type"] != "CHILD":
+        raise HTTPException(
+            status_code=403,
+            detail="Child access required",
+        )
+
+    return user
+
+
+# =========================
 # Health Check
 # =========================
 
@@ -50,8 +142,38 @@ def health_check():
 # TASKS
 # =========================
 
-@app.post("/tasks")
-def create_task_endpoint(request: CreateTaskRequest):
+@app.post("/tasks", dependencies=[Depends(security)])
+def create_task_endpoint(
+    request: CreateTaskRequest,
+    authorization: str | None = Header(default=None),
+):
+    parent = require_parent(authorization)
+
+    connection = get_connection()
+
+    child = connection.execute(
+        """
+        SELECT id, parent_id
+        FROM children
+        WHERE id = ?
+        """,
+        (request.child_id,),
+    ).fetchone()
+
+    connection.close()
+
+    if child is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Child not found",
+        )
+
+    if child["parent_id"] != parent["id"]:
+        raise HTTPException(
+            status_code=403,
+            detail="Parent does not own this child",
+        )
+
     try:
         task_id = create_task(
             child_id=request.child_id,
@@ -71,8 +193,38 @@ def create_task_endpoint(request: CreateTaskRequest):
         )
 
 
-@app.post("/tasks/{task_id}/done")
-def mark_task_done_endpoint(task_id: int):
+@app.post("/tasks/{task_id}/done", dependencies=[Depends(security)])
+def mark_task_done_endpoint(
+    task_id: int,
+    authorization: str | None = Header(default=None),
+):
+    child = require_child(authorization)
+
+    connection = get_connection()
+
+    task = connection.execute(
+        """
+        SELECT child_id
+        FROM tasks
+        WHERE id = ?
+        """,
+        (task_id,),
+    ).fetchone()
+
+    connection.close()
+
+    if task is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Task not found",
+        )
+
+    if task["child_id"] != child["id"]:
+        raise HTTPException(
+            status_code=403,
+            detail="Child does not own this task",
+        )
+
     try:
         mark_task_done(task_id)
 
@@ -87,8 +239,42 @@ def mark_task_done_endpoint(task_id: int):
         )
 
 
-@app.post("/tasks/{task_id}/approve")
-def approve_task_endpoint(task_id: int):
+@app.post("/tasks/{task_id}/approve", dependencies=[Depends(security)])
+def approve_task_endpoint(
+    task_id: int,
+    authorization: str | None = Header(default=None),
+):
+    parent = require_parent(authorization)
+
+    connection = get_connection()
+
+    task = connection.execute(
+        """
+        SELECT
+            tasks.id,
+            children.parent_id
+        FROM tasks
+        JOIN children
+            ON children.id = tasks.child_id
+        WHERE tasks.id = ?
+        """,
+        (task_id,),
+    ).fetchone()
+
+    connection.close()
+
+    if task is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Task not found",
+        )
+
+    if task["parent_id"] != parent["id"]:
+        raise HTTPException(
+            status_code=403,
+            detail="Parent does not own this task",
+        )
+
     try:
         return approve_task(task_id)
 
@@ -99,8 +285,42 @@ def approve_task_endpoint(task_id: int):
         )
 
 
-@app.post("/tasks/{task_id}/reject")
-def reject_task_endpoint(task_id: int):
+@app.post("/tasks/{task_id}/reject", dependencies=[Depends(security)])
+def reject_task_endpoint(
+    task_id: int,
+    authorization: str | None = Header(default=None),
+):
+    parent = require_parent(authorization)
+
+    connection = get_connection()
+
+    task = connection.execute(
+        """
+        SELECT
+            tasks.id,
+            children.parent_id
+        FROM tasks
+        JOIN children
+            ON children.id = tasks.child_id
+        WHERE tasks.id = ?
+        """,
+        (task_id,),
+    ).fetchone()
+
+    connection.close()
+
+    if task is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Task not found",
+        )
+
+    if task["parent_id"] != parent["id"]:
+        raise HTTPException(
+            status_code=403,
+            detail="Parent does not own this task",
+        )
+
     try:
         return reject_task(task_id)
 
@@ -111,8 +331,42 @@ def reject_task_endpoint(task_id: int):
         )
 
 
-@app.post("/tasks/{task_id}/undo")
-def undo_approval_endpoint(task_id: int):
+@app.post("/tasks/{task_id}/undo", dependencies=[Depends(security)])
+def undo_approval_endpoint(
+    task_id: int,
+    authorization: str | None = Header(default=None),
+):
+    parent = require_parent(authorization)
+
+    connection = get_connection()
+
+    task = connection.execute(
+        """
+        SELECT
+            tasks.id,
+            children.parent_id
+        FROM tasks
+        JOIN children
+            ON children.id = tasks.child_id
+        WHERE tasks.id = ?
+        """,
+        (task_id,),
+    ).fetchone()
+
+    connection.close()
+
+    if task is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Task not found",
+        )
+
+    if task["parent_id"] != parent["id"]:
+        raise HTTPException(
+            status_code=403,
+            detail="Parent does not own this task",
+        )
+
     try:
         return undo_approval(task_id)
 
@@ -127,8 +381,19 @@ def undo_approval_endpoint(task_id: int):
 # USAGE
 # =========================
 
-@app.post("/usage")
-def report_usage_endpoint(request: UsageRequest):
+@app.post("/usage", dependencies=[Depends(security)])
+def report_usage_endpoint(
+    request: UsageRequest,
+    authorization: str | None = Header(default=None),
+):
+    child = require_child(authorization)
+
+    if request.child_id != child["id"]:
+        raise HTTPException(
+            status_code=403,
+            detail="Child does not match authorization token",
+        )
+
     try:
         return report_usage(
             child_id=request.child_id,
@@ -149,9 +414,49 @@ def report_usage_endpoint(request: UsageRequest):
 # BALANCE
 # =========================
 
-@app.get("/children/{child_id}/balance")
-def get_child_balance(child_id: int):
+@app.get("/children/{child_id}/balance", dependencies=[Depends(security)])
+def get_child_balance(
+    child_id: int,
+    authorization: str | None = Header(default=None),
+):
+    user = get_authenticated_user(authorization)
+
     connection = get_connection()
+
+    child = connection.execute(
+        """
+        SELECT id, parent_id
+        FROM children
+        WHERE id = ?
+        """,
+        (child_id,),
+    ).fetchone()
+
+    if child is None:
+        connection.close()
+
+        raise HTTPException(
+            status_code=404,
+            detail="Child not found",
+        )
+
+    if user["type"] == "CHILD":
+        if user["id"] != child_id:
+            connection.close()
+
+            raise HTTPException(
+                status_code=403,
+                detail="Access denied",
+            )
+
+    elif user["type"] == "PARENT":
+        if user["id"] != child["parent_id"]:
+            connection.close()
+
+            raise HTTPException(
+                status_code=403,
+                detail="Parent does not own this child",
+            )
 
     row = connection.execute(
         """
@@ -174,9 +479,49 @@ def get_child_balance(child_id: int):
 # LEDGER
 # =========================
 
-@app.get("/children/{child_id}/ledger")
-def get_child_ledger(child_id: int):
+@app.get("/children/{child_id}/ledger", dependencies=[Depends(security)])
+def get_child_ledger(
+    child_id: int,
+    authorization: str | None = Header(default=None),
+):
+    user = get_authenticated_user(authorization)
+
     connection = get_connection()
+
+    child = connection.execute(
+        """
+        SELECT id, parent_id
+        FROM children
+        WHERE id = ?
+        """,
+        (child_id,),
+    ).fetchone()
+
+    if child is None:
+        connection.close()
+
+        raise HTTPException(
+            status_code=404,
+            detail="Child not found",
+        )
+
+    if user["type"] == "CHILD":
+        if user["id"] != child_id:
+            connection.close()
+
+            raise HTTPException(
+                status_code=403,
+                detail="Access denied",
+            )
+
+    elif user["type"] == "PARENT":
+        if user["id"] != child["parent_id"]:
+            connection.close()
+
+            raise HTTPException(
+                status_code=403,
+                detail="Parent does not own this child",
+            )
 
     rows = connection.execute(
         """

@@ -1,33 +1,80 @@
-from app.database import init_db, get_connection
+from app.database import get_connection, init_db
 
-# Create all database tables
+
 init_db()
 
 connection = get_connection()
 
+# Create parent only if it does not already exist
 parent = connection.execute(
     """
-    INSERT INTO parents (name, token)
-    VALUES (?, ?)
+    SELECT id, name, token
+    FROM parents
+    WHERE token = ?
     """,
-    ("Test Parent", "parent-token"),
-)
+    ("parent-token",),
+).fetchone()
 
-parent_id = parent.lastrowid
+if parent is None:
+    connection.execute(
+        """
+        INSERT INTO parents (name, token)
+        VALUES (?, ?)
+        """,
+        ("Test Parent", "parent-token"),
+    )
 
+    connection.commit()
+
+    parent = connection.execute(
+        """
+        SELECT id, name, token
+        FROM parents
+        WHERE token = ?
+        """,
+        ("parent-token",),
+    ).fetchone()
+
+
+# Create child only if it does not already exist
 child = connection.execute(
     """
-    INSERT INTO children (name, parent_id, token)
-    VALUES (?, ?, ?)
+    SELECT id, name, token, parent_id
+    FROM children
+    WHERE token = ?
     """,
-    ("Test Child", parent_id, "child-token"),
-)
+    ("child-token",),
+).fetchone()
 
-child_id = child.lastrowid
+if child is None:
+    connection.execute(
+        """
+        INSERT INTO children (name, token, parent_id)
+        VALUES (?, ?, ?)
+        """,
+        ("Test Child", "child-token", parent["id"]),
+    )
 
-connection.commit()
+    connection.commit()
+
+    child = connection.execute(
+        """
+        SELECT id, name, token, parent_id
+        FROM children
+        WHERE token = ?
+        """,
+        ("child-token",),
+    ).fetchone()
+
+
 connection.close()
 
-print("Parent ID:", parent_id)
-print("Child ID:", child_id)
-print("Test data created successfully")
+print("Test data is ready.")
+print()
+print(f"Parent ID   : {parent['id']}")
+print(f"Parent name : {parent['name']}")
+print(f"Parent token: {parent['token']}")
+print()
+print(f"Child ID    : {child['id']}")
+print(f"Child name  : {child['name']}")
+print(f"Child token : {child['token']}")
